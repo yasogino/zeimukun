@@ -209,29 +209,53 @@ function calc() {
   var taxBase = Math.max(0, asset - kijo);
   document.getElementById('card-base').textContent = taxBase <= 0 ? '課税なし' : fmt(taxBase);
 
-  /* ── 対策なし相続税（配偶者控除なし） ── */
-  var taxNo = Math.round(taxCalc(taxBase / heir) * heir);
-
-  /* ── 対策あり相続税 ──
-     配偶者ありの場合：
-       ① 各相続人が法定相続分で按分した仮の相続税総額を算出
-       ② 配偶者の取得分（法定相続分1/2）に対応する税額を配偶者税額軽減として控除
-       → 実務上は「配偶者の相続税額 = 0 or 大幅軽減」になることが多い
-     ここでは簡略化として：
-       配偶者の取得相続税額（taxBase/2 に対応する税額）を全額控除
-  */
+  /* ── 相続税（対策なし）──────────────────────────
+     【配偶者なし】
+       子 heir 人で均等按分 → 各自の税額 × heir で合算
+     【配偶者あり】
+       ① 法定相続分：配偶者 1/2、子 (heir-1)人で残り 1/2 を均等按分
+          ※ heir は「配偶者を含む総相続人数」として扱う
+       ② 仮の相続税総額を算出（配偶者分＋子分）
+       ③ 配偶者税額軽減：配偶者の取得額（taxBase/2）に対応する
+          仮の税額相当を控除（配偶者の仮税額 = 配偶者持分 × 総税率）
+  ────────────────────────────────────────── */
+  var taxNo;
   var spouseRelief = 0;
-  if (hasSpouse && taxBase > 0) {
-    /* 配偶者が課税財産の1/2を取得した場合の税額を軽減 */
-    var spouseTaxBase = taxBase / 2;
-    /* 配偶者の取得分を法定相続人数で按分した税率で計算 */
-    spouseRelief = Math.round(taxCalc(spouseTaxBase / heir) * heir * 0.5);
-    /* より精緻な計算：配偶者単独の相続税相当額 */
-    spouseRelief = Math.round(taxCalc(spouseTaxBase));
+
+  if (!hasSpouse || heir === 1) {
+    /* 配偶者なし（または相続人1人）：単純按分 */
+    taxNo = Math.round(taxCalc(taxBase / heir) * heir);
+  } else {
+    /* 配偶者あり：
+       相続人数 heir のうち1人が配偶者、(heir-1)人が子
+       法定相続分：配偶者 1/2、各子 1/(2*(heir-1))
+    */
+    var childNum      = heir - 1;          // 子の人数
+    var spouseShare   = taxBase / 2;       // 配偶者の取得課税財産
+    var childShare    = childNum > 0
+                          ? taxBase / 2 / childNum  // 各子の取得課税財産
+                          : 0;
+
+    /* 法定相続分での仮の相続税総額（速算表を各持分に適用して合算） */
+    var grossTax = taxCalc(spouseShare) + (childNum > 0 ? taxCalc(childShare) * childNum : 0);
+
+    /* 配偶者税額軽減額：
+       配偶者の取得割合（= 1/2）× 仮の相続税総額
+       ただし配偶者の実際取得額が1億6,000万円以下の場合は全額軽減
+       ここでは「法定相続分取得」の前提で按分計算 */
+    var spouseTaxBefore = grossTax * 0.5;  // 配偶者が仮に負担する税額
+    spouseRelief = Math.round(spouseTaxBefore);
+
+    taxNo = Math.round(grossTax);
   }
 
-  var taxYes  = Math.max(0, Math.round(taxNo * 0.60) - spouseRelief);
-  var saving  = taxNo - taxYes;
+  /* ── 相続税（対策あり）──────────────────────────
+     配偶者あり：taxNo × 10%（対策効果 90%）
+     配偶者なし：taxNo × 60%（対策効果 40%）
+  ────────────────────────────────────────── */
+  var taxYesRate = hasSpouse ? 0.10 : 0.60;
+  var taxYes     = Math.round(taxNo * taxYesRate);
+  var saving     = taxNo - taxYes;
 
   /* ── 紛争リスク ── */
   var disputeRisk;
@@ -255,8 +279,10 @@ function calc() {
   document.getElementById('card-diff').textContent = diff > 0 ? '約 ' + fmt(diff) : '—';
 
   /* ── コメント文 ── */
-  var spouseNote = hasSpouse ? '配偶者税額軽減（' + fmt(spouseRelief) + '軽減）を適用。' : '';
-  var execNote   = hasExec   ? '遺言執行者報酬' + fmt(execFee) + 'を含む。' : '';
+  var spouseNote = hasSpouse
+    ? '配偶者税額軽減を適用（軽減額約' + fmt(spouseRelief) + '）。対策あり効果90%。'
+    : '配偶者なし。対策あり効果40%。';
+  var execNote = hasExec ? '遺言執行者報酬' + fmt(execFee) + 'を含む。' : '';
   var comment;
   if (taxBase <= 0) {
     comment = '基礎控除（' + fmt(kijo) + '）内のため相続税はゼロです。' +
@@ -265,10 +291,10 @@ function calc() {
   } else {
     comment = '総財産' + fmt(asset) + '・相続人' + heir + '人。' + spouseNote +
       '対策なし合計は約' + fmt(totalNo) + '（相続税' + fmt(taxNo) + '＋紛争コスト想定' + fmt(disputeRisk) + '）。' +
-      '特例活用で税額を約' + fmt(saving) + '削減でき、' +
-      '対策コスト合計は約' + fmt(totalYes) + '（診断30万＋遺言作成30万' + (hasExec ? '＋執行者報酬' + fmt(execFee) : '') + '＋税' + fmt(taxYes) + '）。' +
-      execNote +
-      '差額は約' + fmt(diff) + 'です。';
+      '対策により税額を約' + fmt(saving) + '削減でき、' +
+      '対策コスト合計は約' + fmt(totalYes) + '（診断30万＋遺言作成30万' +
+      (hasExec ? '＋執行者報酬' + fmt(execFee) : '') + '＋税' + fmt(taxYes) + '）。' +
+      execNote + '差額は約' + fmt(diff) + 'です。';
   }
   document.getElementById('comment').textContent = comment;
 
